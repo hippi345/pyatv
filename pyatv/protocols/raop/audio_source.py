@@ -130,6 +130,10 @@ class BufferedIOBaseWrapper(io.BufferedIOBase):
         self.reader: io.BufferedIOBase = reader
         self.buffer: SemiSeekableBuffer = buffer
         self.name = "stream"
+        # Tracks the logical position when seek(0, SEEK_END) parks the cursor
+        # past the last buffer index (which SemiSeekableBuffer cannot represent).
+        # Cleared by every other seek so that tell() stays consistent.
+        self._virtual_position: Optional[int] = None
 
     def read(self, size=-1):
         """Read bytes from stream."""
@@ -147,6 +151,7 @@ class BufferedIOBaseWrapper(io.BufferedIOBase):
 
     def seek(self, pos, origin=io.SEEK_SET):
         """Seek to position in stream."""
+        self._virtual_position = None
         if origin == io.SEEK_SET:
             if not self.buffer.seek(pos):
                 raise OSError(f"cannot seek to absolute position {pos}")
@@ -154,12 +159,30 @@ class BufferedIOBaseWrapper(io.BufferedIOBase):
             absolute = self.buffer.position + pos
             if not self.buffer.seek(absolute):
                 raise OSError(f"cannot seek to position {absolute} (SEEK_CUR)")
+        elif origin == io.SEEK_END:
+            # Total bytes currently held in the buffer.  For a small stream that
+            # has been fully downloaded this equals the file size; for a larger
+            # stream it is however many bytes have been buffered so far.
+            total = self.buffer.position + self.buffer.size
+            absolute = total + pos
+            if absolute > total:
+                raise OSError(f"cannot seek past end of buffered data (pos={pos})")
+            if absolute == total:
+                # End-of-stream is not a valid buffer position (the buffer holds
+                # indices 0..N-1).  Park a virtual position so tell() reflects
+                # the correct offset; the next seek will clear it.
+                self._virtual_position = absolute
+                return absolute
+            if not self.buffer.seek(absolute):
+                raise OSError(f"cannot seek to position {absolute} (SEEK_END)")
         else:
             raise OSError(f"seek whence={origin} is not supported on streaming source")
         return self.buffer.position
 
     def tell(self):
         """Return current position in stream."""
+        if self._virtual_position is not None:
+            return self._virtual_position
         return self.buffer.position
 
     def seekable(self):
@@ -233,6 +256,10 @@ class StreamableSourceWrapper(io.BufferedIOBase):
         self.buffer = buffer
         # Medafile uses this in error messages, so it helps for debugging
         self.name = name
+        # Tracks the logical position when seek(0, SEEK_END) parks the cursor
+        # past the last buffer index (which SemiSeekableBuffer cannot represent).
+        # Cleared by every other seek so that tell() stays consistent.
+        self._virtual_position: Optional[int] = None
 
     def read(self, size=-1):
         """Read bytes from stream."""
@@ -240,6 +267,7 @@ class StreamableSourceWrapper(io.BufferedIOBase):
 
     def seek(self, pos, origin=io.SEEK_SET):
         """Seek to position in stream."""
+        self._virtual_position = None
         if origin == io.SEEK_SET:
             if not self.source.seek(pos, miniaudio.SeekOrigin.START):
                 raise OSError(f"cannot seek to absolute position {pos}")
@@ -247,12 +275,30 @@ class StreamableSourceWrapper(io.BufferedIOBase):
             absolute = self.buffer.position + pos
             if not self.source.seek(absolute, miniaudio.SeekOrigin.START):
                 raise OSError(f"cannot seek to position {absolute} (SEEK_CUR)")
+        elif origin == io.SEEK_END:
+            # Total bytes currently held in the buffer.  For a small stream that
+            # has been fully downloaded this equals the file size; for a larger
+            # stream it is however many bytes have been buffered so far.
+            total = self.buffer.position + self.buffer.size
+            absolute = total + pos
+            if absolute > total:
+                raise OSError(f"cannot seek past end of buffered data (pos={pos})")
+            if absolute == total:
+                # End-of-stream is not a valid buffer position (the buffer holds
+                # indices 0..N-1).  Park a virtual position so tell() reflects
+                # the correct offset; the next seek will clear it.
+                self._virtual_position = absolute
+                return absolute
+            if not self.source.seek(absolute, miniaudio.SeekOrigin.START):
+                raise OSError(f"cannot seek to position {absolute} (SEEK_END)")
         else:
             raise OSError(f"seek whence={origin} is not supported on streaming source")
         return self.buffer.position
 
     def tell(self):
         """Return current position in stream."""
+        if self._virtual_position is not None:
+            return self._virtual_position
         return self.buffer.position
 
     def seekable(self):

@@ -171,6 +171,10 @@ be passed instead of a file path:
 await stream.stream_file("https://foo.bar/test.mp3")
 ```
 
+Metadata (title, artist, etc.) is extracted from the first ~32 KB of the HTTP
+response before playback begins.  Sources smaller than that window return metadata
+as usual; larger sources return empty metadata without blocking playback.
+
 #### File Compatibility
 
 It is possible to verify if a file is supported programmatically using
