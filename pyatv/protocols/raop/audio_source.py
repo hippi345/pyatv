@@ -325,8 +325,11 @@ async def get_buffered_io_metadata(buffer: io.BufferedIOBase) -> MediaMetadata:
     except Exception:
         _LOGGER.exception("Failed to parse metadata")
     finally:
-        buffer.seek(0)
-        if buffer.seek(before) != before:
+        try:
+            buffer.seek(0)
+            if buffer.seek(before) != before:
+                _LOGGER.warning("Failed to restore position to %d", before)
+        except OSError:
             _LOGGER.warning("Failed to restore position to %d", before)
 
     return EMPTY_METADATA

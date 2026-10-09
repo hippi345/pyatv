@@ -21,6 +21,7 @@ from pyatv.protocols.raop.audio_source import (
     get_buffered_io_metadata,
 )
 from pyatv.support.buffer import SemiSeekableBuffer
+from pyatv.support.metadata import EMPTY_METADATA
 
 from tests.utils import data_path
 
@@ -129,10 +130,13 @@ class TestStreamableSourceWrapperSeek:
 
         tell() must also return that value so that callers (e.g. TinyTag) which
         read the position via tell() after the seek get the correct file size.
+        The invariant total = buffer.position + buffer.size must hold at any
+        cursor position, so we verify after an initial read advances position.
         """
         wrapper = _make_ssw(b"x" * 200, headroom=128)
+        wrapper.read(50)  # advance position to 50; size drops to 150
         result = wrapper.seek(0, io.SEEK_END)
-        assert result == 200
+        assert result == 200  # total must still equal original buffered size
         assert wrapper.tell() == 200
 
     async def test_seek_end_past_buffer_raises(self):
@@ -195,10 +199,13 @@ class TestBufferedIOBaseWrapperSeek:
 
         tell() must also return that value so that callers (e.g. TinyTag) which
         read the position via tell() after the seek get the correct file size.
+        The invariant total = buffer.position + buffer.size must hold at any
+        cursor position, so we verify after an initial read advances position.
         """
         wrapper = _make_biow(b"x" * 200, headroom=128)
+        wrapper.read(50)  # advance position to 50; size drops to 150
         result = wrapper.seek(0, io.SEEK_END)
-        assert result == 200
+        assert result == 200  # total must still equal original buffered size
         assert wrapper.tell() == 200
 
     async def test_seek_end_past_buffer_raises(self):
@@ -333,3 +340,70 @@ async def test_metadata_large_stream_returns_fast(monkeypatch):
     )
     assert metadata.title is None
     assert metadata.artist is None
+
+
+async def test_metadata_restore_failure_does_not_raise(caplog):
+    """A failed position-restore in get_buffered_io_metadata must not raise.
+
+    After the SEEK_CUR/SEEK_END fix, seek() raises OSError on failure instead
+    of silently ignoring it.  The finally-block in get_buffered_io_metadata
+    restores the stream position after parsing; if that seek fails the function
+    must swallow the OSError, log a warning, and return normally so that
+    playback is never interrupted by a metadata position-restore failure.
+    """
+    import logging
+
+    with open(data_path("audio_1_packet_metadata.wav"), "rb") as fh:
+        audio_data = fh.read()
+
+    buf = SemiSeekableBuffer(
+        BUFFER_SIZE,
+        seekable_headroom=HEADROOM_SIZE,
+        protected_headroom=True,
+    )
+    buf.add(audio_data)
+    src = _FakeStreamableSource(buf)
+    wrapper = StreamableSourceWrapper(src, buf)
+
+    # Replace seek with a version that always raises OSError.  We install it
+    # after constructing the wrapper so that get_buffered_io_metadata's initial
+    # seek(0) (which happens *before* get_metadata is called) still works; the
+    # broken seek only fires inside the finally-block restore.
+    # To achieve this without relying on TinyTag's exact call count we patch
+    # StreamableSourceWrapper.seek on the class, gated by a flag that is set
+    # when TinyTag has finished and the finally-block is entered.
+    restore_phase = {"active": False}
+    original_seek = type(wrapper).seek
+
+    def failing_seek(self, pos, origin=io.SEEK_SET):
+        """Raise OSError during the restore phase, pass through otherwise."""
+        if restore_phase["active"]:
+            raise OSError("simulated restore failure")
+        return original_seek(self, pos, origin)
+
+    type(wrapper).seek = failing_seek
+    try:
+        # Trigger the restore phase just before the finally-block runs by
+        # monkey-patching get_metadata to set the flag after it returns.
+        import pyatv.protocols.raop.audio_source as _mod
+
+        real_get_metadata = _mod.get_metadata
+
+        async def _patched_get_metadata(buf_arg):
+            result = await real_get_metadata(buf_arg)
+            restore_phase["active"] = True
+            return result
+
+        _mod.get_metadata = _patched_get_metadata
+        try:
+            with caplog.at_level(
+                logging.WARNING, logger="pyatv.protocols.raop.audio_source"
+            ):
+                result = await get_buffered_io_metadata(wrapper)
+        finally:
+            _mod.get_metadata = real_get_metadata
+    finally:
+        type(wrapper).seek = original_seek
+
+    assert isinstance(result, type(EMPTY_METADATA))
+    assert any("Failed to restore position" in r.message for r in caplog.records)
