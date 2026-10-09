@@ -148,7 +148,14 @@ class BufferedIOBaseWrapper(io.BufferedIOBase):
     def seek(self, pos, origin=io.SEEK_SET):
         """Seek to position in stream."""
         if origin == io.SEEK_SET:
-            self.buffer.seek(pos)
+            if not self.buffer.seek(pos):
+                raise OSError(f"cannot seek to absolute position {pos}")
+        elif origin == io.SEEK_CUR:
+            absolute = self.buffer.position + pos
+            if not self.buffer.seek(absolute):
+                raise OSError(f"cannot seek to position {absolute} (SEEK_CUR)")
+        else:
+            raise OSError(f"seek whence={origin} is not supported on streaming source")
         return self.buffer.position
 
     def tell(self):
@@ -234,7 +241,14 @@ class StreamableSourceWrapper(io.BufferedIOBase):
     def seek(self, pos, origin=io.SEEK_SET):
         """Seek to position in stream."""
         if origin == io.SEEK_SET:
-            self.source.seek(pos, miniaudio.SeekOrigin.START)
+            if not self.source.seek(pos, miniaudio.SeekOrigin.START):
+                raise OSError(f"cannot seek to absolute position {pos}")
+        elif origin == io.SEEK_CUR:
+            absolute = self.buffer.position + pos
+            if not self.source.seek(absolute, miniaudio.SeekOrigin.START):
+                raise OSError(f"cannot seek to position {absolute} (SEEK_CUR)")
+        else:
+            raise OSError(f"seek whence={origin} is not supported on streaming source")
         return self.buffer.position
 
     def tell(self):
@@ -263,11 +277,11 @@ async def get_buffered_io_metadata(buffer: io.BufferedIOBase) -> MediaMetadata:
     try:
         return await get_metadata(buffer)
     except Exception:
-        logging.exception("Failed to parse metadata")
+        _LOGGER.exception("Failed to parse metadata")
     finally:
         buffer.seek(0)
         if buffer.seek(before) != before:
-            logging.warning("Failed to restore position to %d", before)
+            _LOGGER.warning("Failed to restore position to %d", before)
 
     return EMPTY_METADATA
 
